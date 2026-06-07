@@ -1,0 +1,121 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - "**"
+    tags:
+      - "**"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            os: ubuntu-latest
+            artifact_name: vlc-cors-proxy-linux
+            asset_name: vlc-cors-proxy-linux
+            binary_path: dist/vlc-cors-proxy
+          - platform: macos
+            os: macos-latest
+            artifact_name: vlc-cors-proxy-macos
+            asset_name: vlc-cors-proxy-macos
+            binary_path: dist/vlc-cors-proxy
+          - platform: windows
+            os: windows-latest
+            artifact_name: vlc-cors-proxy-windows
+            asset_name: vlc-cors-proxy-windows.exe
+            binary_path: dist/vlc-cors-proxy.exe
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install PyInstaller
+        run: python -m pip install --upgrade pip pyinstaller
+
+      - name: Run tests
+        run: python -m unittest
+
+      - name: Smoke check script startup
+        run: python vlc_cors_proxy.py --help
+
+      - name: Build executable
+        run: pyinstaller --onefile --name vlc-cors-proxy vlc_cors_proxy.py
+
+      - name: Package artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifact
+          Copy-Item -LiteralPath "${{ matrix.binary_path }}" -Destination "artifact/${{ matrix.asset_name }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: artifact/${{ matrix.asset_name }}
+          if-no-files-found: error
+
+  release:
+    name: Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'push' &&
+      (github.ref_type == 'tag' || contains(github.event.head_commit.message, '[do release]'))
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: vlc-cors-proxy-*
+          merge-multiple: true
+          path: release-artifacts
+
+      - name: Resolve release tag
+        id: release_tag
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            tag="${GITHUB_REF_NAME}"
+          else
+            short_sha="$(git rev-parse --short=12 HEAD)"
+            tag="release-${GITHUB_RUN_NUMBER}-${short_sha}"
+            git tag "${tag}" HEAD
+            git push origin "refs/tags/${tag}"
+          fi
+
+          {
+            echo "tag=${tag}"
+            echo "title=${tag}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release_tag.outputs.tag }}
+          name: ${{ steps.release_tag.outputs.title }}
+          files: release-artifacts/*
